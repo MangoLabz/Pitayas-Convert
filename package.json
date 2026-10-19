@@ -1,8 +1,8 @@
 {
-  "name": "mango-convert",
-  "version": "1.0.0",
-  "description": "Mango Convert - konwerter wideo, audio i grafiki",
-  "author": "Mango <inbox@rakunek.com>",
+  "name": "pitaya-convert",
+  "version": "0.1.0-beta",
+  "description": "Pitaya Convert - konwerter wideo, audio i grafiki",
+  "author": "Pitayas <inbox@rakunek.com>",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -19,47 +19,63 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.mango.convert",
-    "productName": "Mango-Convert",
+    "appId": "com.pitayas.convert",
+    "productName": "Pitaya-Convert",
     "directories": {
       "output": "dist"
     },
     "files": [
       "**/*",
-      "!dist/*"
+      "!dist/**",
+      "!images/**",
+      "!icon_backup.ico"
     ],
-  "win": {
-    "target": [
-      "nsis"
-    ],
-    "icon": "icon.ico"
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "icon.ico"
     },
     "linux": {
       "target": [
-        "AppImage"
+        "AppImage",
+        "rpm"
       ],
-      "executableName": "mango-convert",
+      "executableName": "pitaya-convert",
       "category": "AudioVideo",
       "icon": "icon.png",
-      "maintainer": "Mango <inbox@rakunek.com>"
+      "maintainer": "Pitayas <inbox@rakunek.com>"
     },
     "rpm": {
-      "packageName": "mango-convert",
+      "packageName": "pitaya-convert",
       "fpm": [
         "--rpm-compression",
-        "none"
-      ]
+        "none",
+        "--replaces=mango-convert"
+      ],
+      "artifactName": "pitaya-convert-${version}.${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
-      "createStartMenuShortcut": true
-    }
+      "createStartMenuShortcut": true,
+      "artifactName": "PitayaConvert-Setup-${version}.${ext}"
+    },
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**",
+      "node_modules/sharp/**",
+      "node_modules/@img/**"
+    ],
+    "appImage": {
+      "artifactName": "PitayaConvert-${version}-${arch}.${ext}"
+    },
+    "copyright": "Copyright © 2026 Pitayas"
   },
   "allowScripts": {
     "electron@32.3.3": true,
     "ffmpeg-static@5.3.0": true,
     "sharp@0.33.5": true
-  }
+  },
+  "homepage": "https://github.com/MangoLabz/Pitayas-Convert"
 }

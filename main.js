@@ -5,13 +5,18 @@ const {
   dialog,
   nativeImage,
   Tray,
-  Menu
+  Menu,
+  shell
 } = require('electron');
 
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const sharp = require('sharp');
+const { createUpdater } = require('./updater');
+
+const updater = createUpdater({ repo: 'MangoLabz/Pitayas-Convert', branch: 'main', appDir: __dirname });
+let lastOutputPath = null;
 
 let ffmpegPath = require('ffmpeg-static');
 
@@ -225,7 +230,7 @@ function handleWindowCloseRequest() {
       buttons: ['Minimalizuj do zasobnika', 'Zamknij program całkowicie'],
       defaultId: 0,
         cancelId: 0,
-        title: 'Mango Convert — Zamykanie',
+        title: 'Pitaya Convert — Zamykanie',
         message: 'Co chcesz zrobić z aplikacją?',
         detail: 'Możesz pozostawić program działający w tle w zasobniku systemowym (obok zegara) lub całkowicie zakończyć jego działanie.',
                                              checkboxLabel: 'Nie pytaj ponownie (zawsze chowaj do zasobnika)',
@@ -252,7 +257,7 @@ function handleWindowCloseRequest() {
 
   if (process.platform === 'win32' && tray && !hasShownTrayNotification) {
     tray.displayBalloon({
-      title: 'Mango Convert',
+      title: 'Pitaya Convert',
       content: 'Aplikacja nadal działa w tle w zasobniku systemowym.',
       iconType: 'info'
     });
@@ -269,9 +274,12 @@ function handleWindowCloseRequest() {
 async function createWindow() {
   let appIcon = null;
   const icoPath = path.join(__dirname, 'icon.ico');
+  const pngPath = path.join(__dirname, 'icon.png');
   const svgPath = path.join(__dirname, 'icon.svg');
 
-  if (fs.existsSync(icoPath)) {
+  if (process.platform !== 'win32' && fs.existsSync(pngPath)) {
+    appIcon = nativeImage.createFromPath(pngPath);
+  } else if (fs.existsSync(icoPath)) {
     appIcon = nativeImage.createFromPath(icoPath);
   } else if (fs.existsSync(svgPath)) {
     try {
@@ -284,16 +292,16 @@ async function createWindow() {
 
   mainWindow = new BrowserWindow({
     width: 620,
-    height: 740,
+    height: 640,
     frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
     resizable: false,
+    title: 'Pitaya Convert',
+    backgroundColor: '#121116',
     icon: appIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-                                 contextIsolation: true,
-                                 nodeIntegration: false
+      contextIsolation: true,
+      nodeIntegration: false
     }
   });
 
@@ -311,7 +319,7 @@ async function createWindow() {
     tray = new Tray(appIcon);
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: 'Otwórz Mango Convert',
+        label: 'Otwórz Pitaya Convert',
         click: () => {
           mainWindow.show();
           mainWindow.focus();
@@ -327,7 +335,7 @@ async function createWindow() {
       }
     ]);
 
-    tray.setToolTip('Mango Convert');
+    tray.setToolTip('Pitaya Convert');
     tray.setContextMenu(contextMenu);
 
     tray.on('click', () => {
@@ -346,9 +354,21 @@ async function createWindow() {
   }
 }
 
+// Tylko jedna instancja — ponowne uruchomienie pokazuje okno schowane w zasobniku
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
 app.whenReady().then(async () => {
   if (process.platform === 'win32') {
-    app.setAppUserModelId('com.mango.convert');
+    app.setAppUserModelId('com.pitayas.convert');
   }
   await createWindow();
 });
@@ -367,6 +387,36 @@ ipcMain.on('window-minimize', () => {
 
 ipcMain.on('window-close', () => {
   handleWindowCloseRequest();
+});
+
+ipcMain.on('app-quit', () => {
+  isQuitting = true;
+  app.quit();
+});
+
+ipcMain.handle('show-output', () => {
+  if (lastOutputPath && fs.existsSync(lastOutputPath)) {
+    shell.showItemInFolder(lastOutputPath);
+    return true;
+  }
+  return false;
+});
+
+/*
+ * | --------------------------------------------------------------------------
+ * | AKTUALIZACJE GITHUB
+ * |--------------------------------------------------------------------------
+ */
+
+ipcMain.handle('app-info', () => ({ name: 'Pitaya Convert', version: app.getVersion(), repoUrl: updater.repoUrl }));
+ipcMain.handle('update-check', () => updater.check());
+ipcMain.handle('update-apply', () => updater.apply());
+ipcMain.on('update-restart', () => {
+  isQuitting = true;
+  updater.restart();
+});
+ipcMain.handle('open-external', (event, url) => {
+  if (typeof url === 'string' && url.startsWith('https://github.com/')) shell.openExternal(url);
 });
 
 ipcMain.handle('select-file', async () => {
@@ -417,6 +467,8 @@ ipcMain.on('start-conversion', async (event, data) => {
     }
     return;
   }
+
+  if (!analyzeOnly) lastOutputPath = outputPath;
 
   if (sourceCategory === 'image' && targetCategory === 'image' && targetFormat !== 'gif') {
     try {

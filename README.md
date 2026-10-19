@@ -1,10 +1,10 @@
-<h2 align="center"><u>Mango Convert</u></h2>
+<h2 align="center"><u>Pitaya Convert</u></h2>
 
 
 <p align="center">
   <img src="images/image.png" width="300">
 </p>
-<h4 align="center"> Mango Convert  </h4>
+<h4 align="center"> Pitaya Convert  </h4>
 
 <p align="center">
     <img src="https://img.shields.io/github/stars/Open-Source-Mango/Mango-Convert?style=for-the-badge&color=orange">
@@ -17,7 +17,7 @@
 </p>
 
 ### [+] Description
-Mango Convert służy do konwertowania zdjęć, filmów, dzwieków, muzyki. Działa on na Windows, Linux, MacOS. 
+Pitaya Convert służy do konwertowania zdjęć, filmów, dzwieków, muzyki. Działa on na Windows, Linux, MacOS. 
 
 ##### Obsługiwane formaty:
 

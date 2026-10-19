@@ -69,18 +69,33 @@ const convertBtn = document.getElementById("convert-btn");
 const statusBox = document.getElementById("status");
 const progressContainer = document.getElementById("progress-container");
 const progressBar = document.getElementById("progress-bar");
+const sourceChip = document.getElementById("sourceChip");
+const resultRow = document.getElementById("show-output-btn");
 
-document.getElementById("min-btn").addEventListener("click", () => {
-  window.api.minimizeWindow();
-});
+function setStatus(text, tone) {
+  statusBox.innerText = text;
+  statusBox.className = `status-box${tone ? ` t-${tone}` : ""}`;
+}
 
-document.getElementById("close-btn").addEventListener("click", () => {
-  window.api.closeWindow();
-});
-
-dropZone.addEventListener("click", async () => {
+async function pickFile() {
+  if (dropZone.style.pointerEvents === "none") return;
   const filePath = await window.api.selectFile();
   if (filePath) handleFile(filePath);
+}
+
+async function showOutput() {
+  const ok = await window.api.showOutput();
+  if (!ok) PitayaUI.showToast("Brak przekonwertowanego pliku do pokazania.", "info");
+}
+
+dropZone.addEventListener("click", pickFile);
+resultRow.addEventListener("click", showOutput);
+
+document.addEventListener("keydown", (e) => {
+  if (!e.ctrlKey) return;
+  const key = e.key.toLowerCase();
+  if (key === "o") { e.preventDefault(); pickFile(); }
+  if (key === "q") { e.preventDefault(); window.api.quit(); }
 });
 
 dropZone.addEventListener("dragover", (e) => {
@@ -96,7 +111,7 @@ dropZone.addEventListener("drop", (e) => {
   e.preventDefault();
   dropZone.classList.remove("active");
   if (e.dataTransfer.files.length > 0) {
-    handleFile(e.dataTransfer.files[0].path);
+    handleFile(window.api.getPathForFile(e.dataTransfer.files[0]));
   }
 });
 
@@ -107,6 +122,8 @@ function handleFile(filePath) {
 
   const ext = fileName.split(".").pop().toLowerCase();
   currentSourceCategory = null;
+  resultRow.classList.remove("show");
+  sourceChip.innerText = `.${ext}`;
 
   for (const [category, data] of Object.entries(CONVERSION_GRAPH)) {
     if (data.formats.includes(ext)) {
@@ -143,20 +160,17 @@ function handleFile(filePath) {
 
     if (currentSourceCategory === "video") {
       convertBtn.disabled = true;
-      statusBox.innerText = `Wykryto .${ext.toUpperCase()} — analizowanie parametrów...`;
-      statusBox.style.color = "#ffb703";
+      setStatus(`Wykryto .${ext.toUpperCase()} — analizowanie parametrów...`, "warn");
       startAnalysis();
     } else {
       convertBtn.disabled = false;
-      statusBox.innerText = `Gotowy do konwersji pliku .${ext.toUpperCase()}`;
-      statusBox.style.color = "#57d638";
+      setStatus(`Gotowy do konwersji pliku .${ext.toUpperCase()}`, "ok");
     }
   } else {
     targetFormatSelect.disabled = true;
     convertBtn.disabled = true;
     gpuGroup.style.display = "none";
-    statusBox.innerText = "Format pliku nie jest obsługiwany.";
-    statusBox.style.color = "#e63900";
+    setStatus("Format pliku nie jest obsługiwany.", "err");
   }
 }
 
@@ -202,8 +216,7 @@ function startAnalysis() {
   const encoder = encoderSelect.value;
 
   analysisTimer = setTimeout(() => {
-    statusBox.innerText = "Analizowanie filmu...";
-    statusBox.style.color = "#ffb703";
+    setStatus("Analizowanie filmu...", "warn");
     convertBtn.disabled = true;
 
     window.api.startConversion({
@@ -222,8 +235,7 @@ window.api.onProgress((data) => {
   if (data.type === "analysis") {
     convertBtn.disabled = false;
     progressContainer.style.display = "none";
-    statusBox.innerText = `${data.width}×${data.height} ${Math.round(data.fps || 30)} FPS | Rozmiar: ~${data.estimatedSize} | Czas: ~${data.estimatedTime} | Bitrate: ${data.bitrate}`;
-    statusBox.style.color = "#57d638";
+    setStatus(`${data.width}×${data.height} ${Math.round(data.fps || 30)} FPS | Rozmiar: ~${data.estimatedSize} | Czas: ~${data.estimatedTime} | Bitrate: ${data.bitrate}`, "ok");
     return;
   }
 
@@ -233,8 +245,7 @@ window.api.onProgress((data) => {
 
   progressContainer.style.display = "block";
   progressBar.style.width = `${percent}%`;
-  statusBox.innerText = `Konwertowanie: ${currentMb} MB | ${percent}% | Pozostało ~${eta}`;
-  statusBox.style.color = "#ffb703";
+  setStatus(`Konwertowanie: ${currentMb} MB | ${percent}% | Pozostało ~${eta}`, "warn");
 });
 
 convertBtn.addEventListener("click", () => {
@@ -251,13 +262,13 @@ convertBtn.addEventListener("click", () => {
 
   const lastDot = currentFilePath.lastIndexOf(".");
   const basePath = lastDot !== -1 ? currentFilePath.substring(0, lastDot) : currentFilePath;
-  const outputPath = `${basePath}_mango.${targetFormat}`;
+  const outputPath = `${basePath}_pitaya.${targetFormat}`;
 
   toggleControls(false);
+  resultRow.classList.remove("show");
   progressContainer.style.display = "block";
   progressBar.style.width = "0%";
-  statusBox.innerText = "Rozpoczynanie konwersji...";
-  statusBox.style.color = "#ffb703";
+  setStatus("Rozpoczynanie konwersji...", "warn");
 
   window.api.startConversion({
     inputPath: currentFilePath,
@@ -278,19 +289,18 @@ window.api.onDone((success) => {
   }, 1200);
 
   if (success) {
-    statusBox.innerText = "Konwersja ukończona pomyślnie! ✨";
-    statusBox.style.color = "#57d638";
+    setStatus("Konwersja ukończona pomyślnie! ✨", "ok");
+    resultRow.classList.add("show");
+    PitayaUI.showToast("Konwersja ukończona!", "success");
   } else {
-    statusBox.innerText = "Wystąpił błąd podczas konwersji.";
-    statusBox.style.color = "#e63900";
+    setStatus("Wystąpił błąd podczas konwersji.", "err");
   }
 });
 
 window.api.onError((err) => {
   toggleControls(true);
   progressContainer.style.display = "none";
-  statusBox.innerText = err;
-  statusBox.style.color = "#e63900";
+  setStatus(err, "err");
 });
 
 function toggleControls(enable) {
