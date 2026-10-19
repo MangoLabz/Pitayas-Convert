@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" type="image/svg+xml" href="icon.svg">
   <title>Pitaya Convert</title>
-  <link rel="stylesheet" href="pitaya-theme.css">
+  <link rel="stylesheet" href="core/ui/pitaya-theme.css">
   <style>
     .drop-zone {
       border: 1.5px dashed var(--m-line-strong); background: var(--m-field); border-radius: 20px;
@@ -27,6 +27,24 @@
     .status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .result-btn { display: none; flex-shrink: 0; }
     .result-btn.show { display: inline-flex; }
+
+    .file-info { display: none; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+    .file-info.show { display: flex; }
+    .file-info .m-chip { font-family: inherit; font-weight: 600; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .row2.single { grid-template-columns: 1fr; }
+    .actions { display: flex; gap: 8px; }
+    .actions .m-btn.accent { flex: 1; }
+    #cancel-btn { display: none; }
+    .converting #cancel-btn { display: inline-flex; }
+    .progress-stats { display: none; justify-content: space-between; font-size: 11.5px; color: var(--m-text-3); font-family: 'JetBrains Mono', monospace; margin-top: -6px; }
+    .converting .progress-stats { display: flex; }
+    .enc-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .enc-item { font-size: 11.5px; font-weight: 600; color: var(--m-text-2); background: var(--m-item); border-radius: 999px; padding: 4px 11px; }
+    .enc-item.best { background: var(--m-accent-soft); color: var(--m-accent); }
+    .enc-list .m-small { width: 100%; }
+    .data-row { display: flex; align-items: center; gap: 10px; }
+    .data-row code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--m-text-2); background: var(--m-surface); padding: 6px 10px; border-radius: 999px; }
   </style>
 </head>
 <body>
@@ -84,29 +102,42 @@
             <span>Wideo, muzyka, grafiki, SVG, ikony ICO</span>
           </div>
 
+          <div class="file-info" id="file-info"></div>
+
           <div class="m-field">
-            <label class="m-label" for="target-format">Docelowy format i jakość</label>
+            <label class="m-label" for="target-format">Docelowy format</label>
             <select id="target-format" class="m-select" disabled>
               <option value="">Najpierw wskaż plik…</option>
             </select>
           </div>
 
-          <div class="m-field" id="gpu-group" style="display: none;">
-            <label class="m-label" for="encoder-select">Akceleracja kodowania wideo</label>
-            <select id="encoder-select" class="m-select">
-              <option value="nvenc">NVIDIA NVENC (Akceleracja sprzętowa GPU)</option>
-              <option value="cpu">CPU - x264 (Wysoka kompatybilność procesora)</option>
-              <option value="amf">AMD AMF (Karty Radeon)</option>
-              <option value="qsv">Intel QSV (Intel QuickSync)</option>
-              <option value="mac">Apple VideoToolbox (Mac Silicon M-Series)</option>
-            </select>
+          <div class="row2" id="options-row">
+            <div class="m-field" id="quality-group">
+              <label class="m-label" for="quality-select">Jakość</label>
+              <select id="quality-select" class="m-select">
+                <option value="high">Wysoka</option>
+                <option value="balanced">Zbalansowana</option>
+                <option value="small">Mały plik</option>
+                <option value="copy">Bez ponownego kodowania</option>
+              </select>
+            </div>
+            <div class="m-field" id="gpu-group">
+              <label class="m-label" for="encoder-select">Kodowanie wideo</label>
+              <select id="encoder-select" class="m-select">
+                <option value="auto">Automatycznie — wykrywanie…</option>
+              </select>
+            </div>
           </div>
 
-          <button id="convert-btn" class="m-btn accent block" disabled><svg class="ico"><use href="#i-convert"/></svg>Rozpocznij konwersję</button>
+          <div class="actions">
+            <button id="convert-btn" class="m-btn accent" disabled><svg class="ico"><use href="#i-convert"/></svg>Rozpocznij konwersję</button>
+            <button id="cancel-btn" class="m-btn danger">Przerwij</button>
+          </div>
 
           <div class="m-progress" id="progress-container" style="display: none;">
             <div id="progress-bar"></div>
           </div>
+          <div class="progress-stats"><span id="stat-left">0%</span><span id="stat-right"></span></div>
 
           <div class="status-row">
             <div id="status" class="status-box">Gotowy do pracy</div>
@@ -149,6 +180,20 @@
             </div>
           </div>
         </div>
+        <div class="m-update-card">
+          <div class="m-update-head">
+            <div>
+              <div class="m-update-title">Kodery wideo</div>
+              <div class="m-update-status" id="encoderStatus">Wykrywanie…</div>
+            </div>
+            <button class="m-btn small" id="btnRedetect">Wykryj</button>
+          </div>
+          <div class="enc-list" id="encoderList"></div>
+        </div>
+        <div class="m-field">
+          <span class="m-label">Folder danych (Pitaya Core)</span>
+          <div class="data-row"><code id="dataDirText">—</code><button class="m-btn small" id="btnOpenDataDir">Otwórz</button></div>
+        </div>
         <div class="m-small">Repozytorium: <a class="m-link" id="repoLink" href="#">github.com/MangoLabz/Pitayas-Convert</a></div>
       </div>
       <div class="m-modal-footer">
@@ -157,7 +202,7 @@
     </div>
   </div>
 
-  <script src="pitaya-ui.js"></script>
+  <script src="core/ui/pitaya-ui.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

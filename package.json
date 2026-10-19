@@ -1,6 +1,6 @@
 {
   "name": "pitaya-convert",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "Pitaya Convert - konwerter wideo, audio i grafiki",
   "author": "Pitayas <inbox@rakunek.com>",
   "main": "main.js",
@@ -28,7 +28,8 @@
       "**/*",
       "!dist/**",
       "!images/**",
-      "!icon_backup.ico"
+      "!icon_backup.ico",
+      "!test/**"
     ],
     "win": {
       "target": [
