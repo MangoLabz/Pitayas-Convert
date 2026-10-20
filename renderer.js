@@ -123,8 +123,8 @@ async function handleFile(filePath) {
     `<optgroup label="${esc(group)}">${list.map((t) => `<option value="${t.ext}">${esc(t.label)}</option>`).join("")}</optgroup>`).join("");
   targetSelect.disabled = false;
   convertBtn.disabled = false;
-  updateOptions();
   setStatus("Gotowy do konwersji", "ok");
+  updateOptions();
 }
 
 function renderInfo(info, category) {
@@ -160,9 +160,38 @@ function updateOptions() {
   gpuGroup.style.display = showEncoder ? "" : "none";
   optionsRow.style.display = showQuality || showEncoder ? "" : "none";
   optionsRow.classList.toggle("single", !(showQuality && showEncoder));
+  updateAutoLabel();
+  updateEstimate();
 }
 targetSelect.addEventListener("change", updateOptions);
 qualitySelect.addEventListener("change", updateOptions);
+encoderSelect.addEventListener("change", updateEstimate);
+
+// Opis opcji „Automatycznie” zależy od pliku: film w H.265/AV1 dostaje sprzętowe H.265
+function updateAutoLabel() {
+  if (!detection) return;
+  const ext = targetSelect.value;
+  const src = current && current.info && current.info.vcodec;
+  const hevc = detection.encoders.find((e) => e.codec === "hevc" && e.kind !== "cpu");
+  const best = detection.encoders.find((e) => e.id === detection.best);
+  const pick = ext !== "avi" && ["hevc", "av1"].includes(src) && hevc ? hevc : best;
+  encoderSelect.options[0].textContent = `Automatycznie — ${pick ? pick.label : "procesor"}`;
+}
+
+// Szacowany rozmiar wyniku — przy długich filmach to ważna informacja (H.264 z HEVC rośnie)
+let estimateId = 0;
+async function updateEstimate() {
+  if (!current || busy || !targetSelect.value) return;
+  const id = ++estimateId;
+  const est = await window.api.estimate(current.info, { ext: targetSelect.value, quality: qualitySelect.value, encoder: encoderSelect.value });
+  if (id !== estimateId || busy) return;
+  if (!est) { setStatus("Gotowy do konwersji", "ok"); return; }
+  const bigger = est.bytes > current.info.size * 1.2;
+  const ext = targetSelect.value;
+  const copyTip = VIDEO_TARGETS.includes(ext) && current.copyable[ext] && qualitySelect.value !== "copy"
+    ? " · najszybciej: „Bez ponownego kodowania” (sekundy, bez straty jakości)" : "";
+  setStatus(`Gotowy do konwersji · wynik ${est.upTo ? "do " : ""}~${fmtSize(est.bytes)}${bigger ? " (większy niż źródło — wybierz „Mały plik” albo koder H.265)" : ""}${copyTip}`, bigger ? "warn" : "ok");
+}
 
 // ───── Konwersja ─────
 function setBusy(on) {

@@ -258,6 +258,11 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
         const fps = parseFloat((vLine.match(/([\d.]+) fps/) || vLine.match(/([\d.]+) tbr/) || [])[1]) || 0;
         const a = stderr.match(/Stream #\d+:\d+[^:]*: Audio: (\w+)/);
         const isCover = /\(attached pic\)/.test(vLine) || /Video: (mjpeg|png)[^\n]*\(attached pic\)/.test(stderr);
+        // Przepływność: całego pliku z linii Duration, obrazu z linii strumienia (jeśli jest)
+        const totalKbps = +((stderr.match(/Duration:[^\n]*bitrate:\s*(\d+)\s*kb\/s/) || [])[1] || 0);
+        const videoKbps = +((vLine.match(/(\d+)\s*kb\/s/) || [])[1] || 0);
+        const aLine = (stderr.match(/Stream #\d+:\d+[^:]*: Audio:[^\n]*/) || [''])[0];
+        const audioKbps = +((aLine.match(/(\d+)\s*kb\/s/) || [])[1] || 0);
         return {
             category: cat,
             size,
@@ -270,7 +275,24 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
             height: v ? +v[3] : 0,
             fps,
             tenBit: /p10|10le|yuv420p10|p010/.test(vLine),
+            videoBitrate: (videoKbps || (totalKbps ? Math.max(totalKbps - (audioKbps || 192), totalKbps * 0.8) : 0)) * 1000,
+            audioBitrate: (audioKbps || (!v ? totalKbps : 0)) * 1000,
+            ...audioDetails(a ? a[1] : null, aLine),
+            hasCover: /\(attached pic\)/.test(stderr),
         };
+    }
+
+    // Szczegóły dźwięku z linii strumienia ffmpeg, np. „flac, 96000 Hz, stereo, s32 (24 bit)”
+    const LOSSLESS_AUDIO = /^(flac|alac|pcm_|wavpack|ape|tta|truehd|mlp)/;
+    function audioDetails(codec, line) {
+        if (!codec) return {};
+        const named = { mono: 1, stereo: 2, '2.1': 3, quad: 4, '4.0': 4, '5.0': 5, '5.1': 6, '6.1': 7, '7.1': 8 };
+        const layout = (line.match(/Hz,\s*([^,]+),/) || [])[1] || '';
+        const channels = named[layout.replace(/\(.*\)/, '').trim()] || +((layout.match(/(\d+) channels/) || [])[1] || 0) || 2;
+        const sampleRate = +((line.match(/(\d+) Hz/) || [])[1] || 0);
+        const lossless = LOSSLESS_AUDIO.test(codec);
+        const bits = +((line.match(/\((\d+) bit\)/) || [])[1] || (/pcm_[su](24|32)/.test(codec) ? 24 : 16));
+        return { channels, sampleRate, audioLossless: lossless, bitDepth: lossless ? bits : 0 };
     }
 
     // Czy da się przepisać strumienie bez kodowania (szybko i bez strat)
@@ -289,39 +311,121 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
         return { video: videoOk, audio: audioOk };
     }
 
-    function videoEncoderArgs(enc, quality, ext) {
+    // Górny limit przepływności obrazu. Bez niego tryb jakości (CQ/CRF) potrafi z filmu
+    // HEVC 4K 6 Mb/s zrobić H.264 22 Mb/s — wynik 3–4× większy od źródła.
+    // Liczymy, ile bitów potrzebuje docelowy kodek, żeby oddać to, co jest w źródle,
+    // i ucinamy dodatkowo sufitem zależnym od rozdzielczości (na wypadek źródeł typu ProRes).
+    const CODEC_COST = { h264: 1.5, hevc: 1, av1: 0.8, vp9: 1, vp8: 1.6, mpeg4: 2.5, mpeg2video: 3, flv1: 3, wmv3: 2.5, mjpeg: 6, prores: 8 };
+    const QUALITY_SCALE = { high: 1.15, balanced: 0.85, small: 0.55 };
+    function bitrateCap(info, targetCodec, quality) {
+        const pixels = (info.width || 1920) * (info.height || 1080) * (info.fps || 30);
+        const cost = CODEC_COST[targetCodec] || 1.5;
+        const scale = QUALITY_SCALE[quality] || QUALITY_SCALE.balanced;
+        const ceiling = pixels * 0.11 * cost * scale;                  // ok. 10 Mb/s dla 1080p30 H.264 (wysoka)
+        if (!info.videoBitrate) return Math.round(ceiling);
+        const fromSource = (info.videoBitrate / (CODEC_COST[info.vcodec] || 2)) * cost * scale;
+        return Math.max(400000, Math.round(Math.min(fromSource, ceiling)));
+    }
+
+    // Kodeki, które karta NVIDIA dekoduje sprzętowo (NVDEC)
+    const NVDEC = ['h264', 'hevc', 'av1', 'vp9', 'vp8', 'mpeg1video', 'mpeg2video', 'mpeg4', 'vc1', 'mjpeg'];
+
+    // Wybór kodera. „Automatycznie”: film w H.265/AV1 kodujemy sprzętowo do H.265 — szybciej
+    // i plik ma mniej więcej rozmiar źródła (H.264 potrzebuje 1,5–2× więcej danych).
+    function pickEncoder(det, info, ext, requested) {
+        if (requested && requested !== 'auto') {
+            const e = det.encoders.find((x) => x.id === requested);
+            if (e && !(ext === 'avi' && e.codec !== 'h264')) return e;
+        }
+        if (ext !== 'avi' && info && ['hevc', 'av1'].includes(info.vcodec)) {
+            const hw = det.encoders.find((e) => e.codec === 'hevc' && e.kind !== 'cpu');
+            if (hw) return hw;
+        }
+        return det.best;
+    }
+
+    function videoEncoderArgs(enc, quality, ext, cap, info = {}) {
         const q = QUALITY[quality] || QUALITY.balanced;
+        const limit = cap ? ['-maxrate', String(cap), '-bufsize', String(cap * 2)] : [];
         if (ext === 'webm') {
-            return { pre: [], vf: [], args: ['-c:v', 'libvpx-vp9', '-crf', String(q.vp9), '-b:v', '0', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1'] };
+            // libvpx w trybie „constrained quality”: -crf + -b:v jako górny limit
+            return { pre: [], vf: [], args: ['-c:v', 'libvpx-vp9', '-crf', String(q.vp9), '-b:v', cap ? String(cap) : '0', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1'] };
         }
         switch (enc.kind) {
-            case 'nvenc':
-                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-preset', 'p5', '-rc', 'vbr', '-cq', String(q.cq), '-b:v', '0', ...(enc.codec === 'h264' ? ['-profile:v', 'high'] : [])], pix: 'yuv420p' };
+            case 'nvenc': {
+                // gpuDecode: dekodowanie na karcie (NVDEC). H.265/AV1 przyjmują klatki prosto z GPU
+                // (także 10-bit), H.264 potrzebuje 8 bitów — wtedy klatki wracają do RAM na konwersję.
+                const preset = { high: 'p4', balanced: 'p2', small: 'p1' }[quality] || 'p2';
+                const onGpu = enc.gpuDecode && enc.codec !== 'h264';
+                const pre = enc.gpuDecode ? ['-hwaccel', 'cuda', ...(onGpu ? ['-hwaccel_output_format', 'cuda'] : [])] : [];
+                const pix = onGpu ? null : enc.codec === 'h264' ? 'yuv420p' : info.tenBit ? 'p010le' : 'yuv420p';
+                return { pre, vf: [], args: ['-c:v', enc.encoder, '-preset', preset, '-rc', 'vbr', '-cq', String(q.cq), '-b:v', '0', ...limit, ...(enc.codec === 'h264' ? ['-profile:v', 'high'] : [])], pix };
+            }
             case 'vaapi':
-                return { pre: ['-vaapi_device', enc.device], vf: ['format=nv12', 'hwupload'], args: ['-c:v', enc.encoder, '-rc_mode', 'CQP', '-qp', String(q.qp)] };
+                return { pre: ['-vaapi_device', enc.device], vf: ['format=nv12', 'hwupload'], args: cap
+                    ? ['-c:v', enc.encoder, '-rc_mode', 'VBR', '-b:v', String(Math.round(cap * 0.75)), ...limit]
+                    : ['-c:v', enc.encoder, '-rc_mode', 'CQP', '-qp', String(q.qp)] };
             case 'qsv':
-                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-global_quality', String(q.cq), '-preset', 'medium'], pix: 'nv12' };
+                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-global_quality', String(q.cq), '-preset', 'medium', ...limit], pix: 'nv12' };
             case 'amf':
-                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-rc', 'cqp', '-qp_i', String(q.qp), '-qp_p', String(q.qp), '-quality', 'balanced'], pix: 'yuv420p' };
+                return { pre: [], vf: [], args: cap
+                    ? ['-c:v', enc.encoder, '-rc', 'vbr_peak', '-b:v', String(Math.round(cap * 0.75)), ...limit, '-quality', 'balanced']
+                    : ['-c:v', enc.encoder, '-rc', 'cqp', '-qp_i', String(q.qp), '-qp_p', String(q.qp), '-quality', 'balanced'], pix: 'yuv420p' };
             case 'videotoolbox':
-                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-q:v', String(Math.round(100 - q.crf * 2))], pix: 'nv12' };
+                return { pre: [], vf: [], args: ['-c:v', enc.encoder, '-q:v', String(Math.round(100 - q.crf * 2)), ...limit], pix: 'nv12' };
             default:
-                if (enc.encoder === 'libx265') return { pre: [], vf: [], args: ['-c:v', 'libx265', '-crf', String(q.crf + 4), '-preset', 'medium', '-tag:v', 'hvc1'], pix: 'yuv420p' };
-                if (enc.encoder === 'libsvtav1') return { pre: [], vf: [], args: ['-c:v', 'libsvtav1', '-crf', String(q.crf + 12), '-preset', '8'], pix: 'yuv420p' };
-                return { pre: [], vf: [], args: ['-c:v', 'libx264', '-crf', String(q.crf), '-preset', 'veryfast', '-profile:v', 'high'], pix: 'yuv420p' };
+                if (enc.encoder === 'libx265') return { pre: [], vf: [], args: ['-c:v', 'libx265', '-crf', String(q.crf + 4), '-preset', 'medium', '-tag:v', 'hvc1', ...limit], pix: 'yuv420p' };
+                if (enc.encoder === 'libsvtav1') return { pre: [], vf: [], args: ['-c:v', 'libsvtav1', '-crf', String(q.crf + 12), '-preset', '8', ...(cap ? ['-svtav1-params', `mbr=${Math.round(cap / 1000)}`] : [])], pix: 'yuv420p' };
+                return { pre: [], vf: [], args: ['-c:v', 'libx264', '-crf', String(q.crf), '-preset', 'veryfast', '-profile:v', 'high', ...limit], pix: 'yuv420p' };
         }
     }
 
-    function audioArgs(ext, quality) {
-        const q = QUALITY[quality] || QUALITY.balanced;
+    // „faststart” przepisuje na końcu cały plik (indeks na początek). Przy długich filmach
+    // to minuty bez postępu na 99% — robimy to tylko dla krótszych nagrań.
+    const faststart = (ext, duration) => (['mp4', 'mov', 'm4v'].includes(ext) && duration > 0 && duration <= 30 * 60 ? ['-movflags', '+faststart'] : []);
+
+    // Dźwięk: przepływność dla stereo w danej jakości. Dla innej liczby kanałów skalujemy
+    // (mono 0,6×, 5.1 ok. 2,3×) i nigdy nie schodzimy poniżej odpowiednika jakości źródła —
+    // konwersja ma nie pogarszać dźwięku bardziej, niż to konieczne.
+    const AUDIO_RATES = {
+        aac:    { high: 320, balanced: 256, small: 160, max: 512, vsSource: 0.9 },
+        mp3:    { high: 320, balanced: 320, small: 192, max: 320, vsSource: 1 },
+        opus:   { high: 256, balanced: 192, small: 128, max: 510, vsSource: 0.75 },
+        vorbis: { high: 320, balanced: 256, small: 160, max: 500, vsSource: 0.9 },
+    };
+    function audioRate(codec, quality, info = {}) {
+        const r = AUDIO_RATES[codec];
+        const ch = info.channels || 2;
+        const scale = ch <= 1 ? 0.6 : ch === 2 ? 1 : 1 + (ch - 2) * 0.33;
+        // Twarde limity koderów: MP3 320k, Opus 256k na kanał (510k łącznie)
+        const maxRate = codec === 'mp3' ? r.max : codec === 'opus' ? Math.min(256 * ch, 510 * Math.max(1, ch / 2)) : Math.round(r.max * scale);
+        let rate = Math.round((r[quality] || r.balanced) * scale);
+        // Nie gorzej niż źródło (dla stratnego źródła; bezstratne i tak dostaje pełną jakość presetu)
+        if (info.audioBitrate && !info.audioLossless && quality !== 'small') {
+            rate = Math.max(rate, Math.round((info.audioBitrate / 1000) * r.vsSource));
+        }
+        return `${Math.min(rate, maxRate)}k`;
+    }
+
+    function audioArgs(ext, quality, info = {}) {
+        const sr = info.sampleRate || 0;
+        const deep = info.audioLossless && info.bitDepth > 16;   // 24-bit FLAC/WAV itp.
         switch (ext) {
-            case 'mp3': return ['-c:a', 'libmp3lame', '-b:a', quality === 'small' ? '192k' : '320k', '-ar', '44100'];
-            case 'wav': return ['-c:a', 'pcm_s16le'];
-            case 'flac': return ['-c:a', 'flac', '-compression_level', '8'];
-            case 'aac': case 'm4a': return ['-c:a', 'aac', '-b:a', quality === 'high' ? '256k' : q.audio];
-            case 'ogg': return ['-c:a', 'libvorbis', '-q:a', quality === 'small' ? '4' : quality === 'high' ? '8' : '6'];
-            case 'opus': case 'webm': return ['-c:a', 'libopus', '-b:a', quality === 'small' ? '96k' : '160k'];
-            default: return ['-c:a', 'aac', '-b:a', q.audio];
+            case 'mp3':
+                // MP3 obsługuje do 48 kHz i 2 kanałów (wielokanałowy jest miksowany do stereo)
+                return ['-c:a', 'libmp3lame', '-b:a', audioRate('mp3', quality, { ...info, channels: Math.min(info.channels || 2, 2) }),
+                    ...(sr > 48000 ? ['-ar', '48000'] : []), ...((info.channels || 2) > 2 ? ['-ac', '2'] : [])];
+            case 'wav': return ['-c:a', deep ? 'pcm_s24le' : 'pcm_s16le'];
+            case 'flac': return ['-c:a', 'flac', '-compression_level', '8', '-sample_fmt', deep ? 's32' : 's16'];
+            case 'ogg': {
+                // Vorbis w trybie jakości (-q) trzyma się celu lepiej niż -b:a; q z wyliczonej przepływności
+                const kbps = parseInt(audioRate('vorbis', quality, info), 10) / Math.max(1, (info.channels || 2) / 2);
+                const qv = kbps >= 300 ? 9 : kbps >= 250 ? 8 : kbps >= 220 ? 7 : kbps >= 190 ? 6 : kbps >= 155 ? 5 : 4;
+                return ['-c:a', 'libvorbis', '-q:a', String(qv), ...(sr > 48000 ? ['-ar', '48000'] : [])];
+            }
+            case 'opus': case 'webm': return ['-c:a', 'libopus', '-b:a', audioRate('opus', quality, info), '-vbr', 'constrained'];
+            default: // aac, m4a i dźwięk w filmach
+                return ['-c:a', 'aac', '-b:a', audioRate('aac', quality, info), ...(sr > 48000 ? ['-ar', '48000'] : [])];
         }
     }
 
@@ -485,7 +589,13 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
         const audioTargets = ['mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'];
         if (audioTargets.includes(ext)) {
             if (!info.hasAudio) throw new Error('Ten plik nie ma ścieżki dźwiękowej.');
-            args.push('-i', input, '-map', '0:a:0', '-vn', '-map_metadata', '0', ...audioArgs(ext, quality));
+            args.push('-i', input, '-map', '0:a:0');
+            // Okładka albumu zostaje (MP3, M4A, FLAC); OGG/OPUS/WAV jej nie przenoszą
+            const keepCover = info.hasCover && ['mp3', 'm4a', 'flac'].includes(ext) && categoryOf(input) === 'audio';
+            if (keepCover) args.push('-map', '0:v:0', '-c:v', 'copy', '-disposition:v:0', 'attached_pic');
+            else args.push('-vn');
+            args.push('-map_metadata', '0', ...audioArgs(ext, quality, info));
+            if (ext === 'mp3') args.push('-id3v2_version', '3');
             if (ext === 'm4a') args.push('-movflags', '+faststart');
             const r = await ffmpegJob(det.ffmpeg, args, { duration, output, signal, onProgress });
             if (r.aborted) { cleanup(); throw new Error('Przerwano'); }
@@ -515,8 +625,9 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
         if (quality === 'copy') {
             if (!copy.video) throw new Error(`Obrazu ${info.vcodec} nie da się zapisać w .${ext} bez ponownego kodowania — wybierz inną jakość.`);
             args.push('-i', input, '-map', '0:v:0', '-map', '0:a?', '-c:v', 'copy');
-            args.push(...(copy.audio ? ['-c:a', 'copy'] : audioArgs(ext === 'webm' ? 'webm' : 'aac', 'high')));
-            if (['mp4', 'mov', 'm4v'].includes(ext)) args.push('-movflags', '+faststart');
+            if (info.vcodec === 'hevc' && ['mp4', 'mov', 'm4v'].includes(ext)) args.push('-tag:v', 'hvc1');
+            args.push(...(copy.audio ? ['-c:a', 'copy'] : audioArgs(ext === 'webm' ? 'webm' : 'aac', 'high', info)));
+            args.push(...faststart(ext, duration));
             args.push('-map_metadata', '0');
             const r = await ffmpegJob(det.ffmpeg, args, { duration, output, signal, onProgress });
             if (r.aborted) { cleanup(); throw new Error('Przerwano'); }
@@ -526,14 +637,13 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
         }
 
         // Wybór kodera: auto = najlepszy sprzętowy H.264; AVI zawsze H.264
-        let enc = null;
-        if (job.encoder && job.encoder !== 'auto') enc = det.encoders.find((e) => e.id === job.encoder) || null;
-        if (enc && ext === 'avi' && enc.codec !== 'h264') enc = null;
-        if (!enc) enc = det.best;
+        const enc = pickEncoder(det, info, ext, job.encoder);
         const cpu = det.encoders.find((e) => e.id === 'cpu-h264');
         const attempts = [];
         if (ext === 'webm') attempts.push({ kind: 'cpu', id: 'cpu-vp9', label: 'Procesor (CPU) · VP9', ffmpeg: det.ffmpeg });
         else {
+            // NVENC: najpierw z dekodowaniem na karcie, potem z dekodowaniem na CPU, na końcu sam procesor
+            if (enc && enc.kind === 'nvenc' && NVDEC.includes(info.vcodec)) attempts.push({ ...enc, gpuDecode: true });
             if (enc) attempts.push(enc);
             if (cpu && (!enc || enc.id !== cpu.id)) attempts.push(cpu);
         }
@@ -541,33 +651,56 @@ function createEngine({ bundledFfmpeg, log = () => {} } = {}) {
 
         let lastErr = '';
         for (const [i, e] of attempts.entries()) {
-            const vargs = videoEncoderArgs(e, quality, ext);
+            const cap = bitrateCap(info, ext === 'webm' ? 'vp9' : e.codec, quality);
+            const vargs = videoEncoderArgs(e, quality, ext, cap, info);
             const filters = [...vargs.vf];
             const a = [...vargs.pre, '-i', input, '-map', '0:v:0', '-map', '0:a?'];
             if (vargs.pix) a.push('-pix_fmt', vargs.pix);
             if (filters.length) a.push('-vf', filters.join(','));
             a.push(...vargs.args);
+            // Bez znacznika hvc1 Apple (QuickTime, iPhone) nie odtworzy H.265 w MP4/MOV
+            if (e.codec === 'hevc' && ['mp4', 'mov', 'm4v'].includes(ext) && !a.includes('-tag:v')) a.push('-tag:v', 'hvc1');
             if (info.hasAudio) {
                 if (copy.audio && ext !== 'webm' && ext !== 'avi') a.push('-c:a', 'copy');
-                else a.push(...audioArgs(ext === 'webm' ? 'webm' : ext === 'avi' ? 'mp3' : 'aac', quality));
+                else a.push(...audioArgs(ext === 'webm' ? 'webm' : ext === 'avi' ? 'mp3' : 'aac', quality, info));
             }
-            if (['mp4', 'mov', 'm4v'].includes(ext)) a.push('-movflags', '+faststart');
+            a.push(...faststart(ext, duration));
             a.push('-map_metadata', '0');
             const r = await ffmpegJob(e.ffmpeg || det.ffmpeg, a, { duration, output, signal, onProgress });
             if (r.aborted) { cleanup(); throw new Error('Przerwano'); }
             if (r.code === 0) {
                 onProgress({ percent: 100 });
-                return { output, encoder: e.id, encoderLabel: e.label, fallback: i > 0 };
+                return { output, encoder: e.id, encoderLabel: e.label, fallback: i > 0 && e.kind !== attempts[0].kind };
             }
             lastErr = ffmpegError(r.stderr);
             log(`Koder ${e.id} nie zadziałał:`, lastErr);
             cleanup();
-            if (i < attempts.length - 1) onNotice(`${e.label} nie zadziałał — kontynuuję na procesorze.`);
+            const next = attempts[i + 1];
+            if (next && next.kind === 'cpu') onNotice(`${e.label} nie zadziałał — kontynuuję na procesorze.`);
         }
         throw new Error(lastErr || 'Konwersja nie powiodła się.');
     }
 
-    return { detect, probe, convert, targetsFor, categoryOf, QUALITY, canCopy };
+    // Szacowany rozmiar wyniku (górna granica) — pokazywany w oknie przed startem,
+    // żeby nie było niespodzianki, że z 5 GB filmu robi się 8 GB.
+    async function estimate(info, job) {
+        if (!info || !info.duration) return null;
+        const ext = job.ext;
+        const quality = job.quality || 'balanced';
+        const sec = info.duration;
+        const AUDIO = { mp3: quality === 'small' ? 192e3 : 320e3, m4a: 256e3, aac: 256e3, ogg: 224e3, opus: 160e3, flac: 900e3, wav: 1411e3 };
+        if (AUDIO[ext]) return { bytes: Math.round((AUDIO[ext] * sec) / 8), upTo: ext !== 'wav' };
+        if (ext === 'gif' || !info.hasVideo) return null;
+        if (quality === 'copy') return { bytes: info.size, upTo: false };
+        const det = await detect();
+        const enc = pickEncoder(det, info, ext, job.encoder);
+        const codec = ext === 'webm' ? 'vp9' : (enc ? enc.codec : 'h264');
+        const video = bitrateCap(info, codec, quality);
+        const audio = info.hasAudio ? (canCopy(info, ext).audio && ext !== 'webm' && ext !== 'avi' ? (info.audioBitrate || 256e3) : 192e3) : 0;
+        return { bytes: Math.round(((video + audio) * sec) / 8), upTo: true, codec };
+    }
+
+    return { detect, probe, convert, estimate, targetsFor, categoryOf, QUALITY, canCopy };
 }
 
 module.exports = { createEngine, targetsFor, categoryOf, uniqueOutput, QUALITY, TARGETS, VIDEO_IN, AUDIO_IN, IMAGE_IN };

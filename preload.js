@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   probe: (file) => ipcRenderer.invoke('convert:probe', file),
   start: (job) => ipcRenderer.invoke('convert:start', job),
   cancel: () => ipcRenderer.invoke('convert:cancel'),
+  estimate: (info, job) => ipcRenderer.invoke('convert:estimate', info, job),
   onProgress: (cb) => ipcRenderer.on('convert:progress', (e, data) => cb(data)),
   onNotice: (cb) => ipcRenderer.on('convert:notice', (e, text) => cb(text)),
   showOutput: () => ipcRenderer.invoke('show-output'),

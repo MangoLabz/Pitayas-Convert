@@ -176,6 +176,10 @@ ipcMain.handle('convert:start', async (event, job) => {
   }
 });
 
+ipcMain.handle('convert:estimate', async (event, info, job) => {
+  try { return await engine.estimate(info, job); } catch { return null; }
+});
+
 ipcMain.handle('convert:cancel', () => {
   if (current) current.controller.abort();
   return true;
